@@ -429,10 +429,27 @@
                     <label for="videoUrl">
                         <i class="fas fa-link"></i> <span data-i18n="video_url">Video URL</span>
                     </label>
-                    <input type="url" id="videoUrl" class="form-control" 
+                    <input type="text" id="videoUrl" class="form-control" 
                            data-i18n-placeholder="video_url_placeholder"
-                           placeholder="Enter YouTube, Tiktok, Bilibili or other platform video URLs..."
+                           placeholder="Enter YouTube, Tiktok, Bilibili or other platform video URLs... or local:downloads/yourfile.mp4"
                            required>
+                </div>
+
+                <div class="form-group">
+                    <label for="localFiles">
+                        <i class="fas fa-folder-open"></i> 本地文件（downloads）
+                    </label>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <select id="localFiles" class="form-control" style="flex:1;">
+                            <option value="">-- 读取本地 downloads 列表 --</option>
+                        </select>
+                        <div style="display:flex;flex-direction:column;gap:6px;flex:0 0 220px;">
+                            <input type="file" id="uploadFile" class="form-control" />
+                            <div style="height:6px;background:#eee;border-radius:4px;overflow:hidden;display:none;" id="uploadProgressWrap">
+                                <div id="uploadProgressBar" style="height:100%;width:0;background:linear-gradient(90deg,#4a90e2,#7ed321);"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 
                 <div class="form-row">

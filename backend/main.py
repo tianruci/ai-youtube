@@ -130,18 +130,43 @@ async def process_video(
     处理视频链接，返回任务ID
     """
     try:
-        # 检查是否已经在处理相同的URL
-        if url in processing_urls:
+        # 支持本地文件：如果以 local: 开头，则视为本地项目内文件（例如 local:downloads/myvideo.mp4）
+        is_local = False
+        local_path = None
+        if url.startswith("local:"):
+            is_local = True
+            # 允许用户传入 local:downloads/xxx.mp4 或 local:downloads\\xxx.mp4
+            candidate = url[len("local:"):]
+            # 规范化路径，防止路径遍历
+            candidate = candidate.replace('\\', '/')
+            # 只允许位于项目下的 downloads 目录
+            downloads_dir = PROJECT_ROOT / 'downloads'
+            local_path = (PROJECT_ROOT / candidate).resolve()
+            try:
+                # 确保本地文件在 downloads_dir 下
+                if downloads_dir.resolve() not in local_path.parents and downloads_dir.resolve() != local_path.parent:
+                    raise HTTPException(status_code=400, detail="本地文件必须位于 downloads 目录下")
+            except Exception:
+                raise HTTPException(status_code=400, detail="本地文件路径无效")
+
+            # 使用本地路径作为唯一键以避免重复处理
+            key_for_processing = str(local_path)
+        else:
+            # 非本地，仍然使用URL去重
+            key_for_processing = url
+
+        # 检查是否已经在处理相同的资源
+        if key_for_processing in processing_urls:
             # 查找现有任务
             for tid, task in tasks.items():
-                if task.get("url") == url:
+                if task.get("url") == key_for_processing:
                     return {"task_id": tid, "message": "该视频正在处理中，请等待..."}
             
         # 生成唯一任务ID
         task_id = str(uuid.uuid4())
         
-        # 标记URL为正在处理
-        processing_urls.add(url)
+        # 标记资源为正在处理
+        processing_urls.add(key_for_processing)
         
         # 初始化任务状态
         tasks[task_id] = {
@@ -156,7 +181,8 @@ async def process_video(
         save_tasks(tasks)
         
         # 创建并跟踪异步任务
-        task = asyncio.create_task(process_video_task(task_id, url, summary_language))
+        # 创建并跟踪异步任务，传入本地路径信息
+        task = asyncio.create_task(process_video_task(task_id, url, summary_language, is_local=is_local, local_path=str(local_path) if local_path else None))
         active_tasks[task_id] = task
         
         return {"task_id": task_id, "message": "任务已创建，正在处理中..."}
@@ -165,7 +191,7 @@ async def process_video(
         logger.error(f"处理视频时出错: {str(e)}")
         raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
 
-async def process_video_task(task_id: str, url: str, summary_language: str):
+async def process_video_task(task_id: str, url: str, summary_language: str, is_local: bool = False, local_path: str = None):
     """
     异步处理视频任务
     """
@@ -191,8 +217,19 @@ async def process_video_task(task_id: str, url: str, summary_language: str):
         save_tasks(tasks)
         await broadcast_task_update(task_id, tasks[task_id])
         
-        # 下载并转换视频
-        audio_path, video_title = await video_processor.download_and_convert(url, TEMP_DIR)
+        # 下载或使用本地文件并转换音频
+        if is_local and local_path:
+            # 更新状态
+            tasks[task_id].update({
+                "progress": 12,
+                "message": "正在使用本地视频文件..."
+            })
+            save_tasks(tasks)
+            await broadcast_task_update(task_id, tasks[task_id])
+
+            audio_path, video_title = await video_processor.convert_local_video(Path(local_path), TEMP_DIR)
+        else:
+            audio_path, video_title = await video_processor.download_and_convert(url, TEMP_DIR)
         
         # 下载完成，更新状态
         tasks[task_id].update({
@@ -341,8 +378,8 @@ async def process_video_task(task_id: str, url: str, summary_language: str):
         await broadcast_task_update(task_id, tasks[task_id])
         logger.info(f"最终状态已广播: {task_id}")
         
-        # 从处理列表中移除URL
-        processing_urls.discard(url)
+        # 从处理列表中移除资源标识
+        processing_urls.discard(key_for_processing)
         
         # 从活跃任务列表中移除
         if task_id in active_tasks:
@@ -506,6 +543,56 @@ async def get_active_tasks():
         "processing_urls": processing_count,
         "task_ids": list(active_tasks.keys())
     }
+
+
+@app.get("/api/local-files")
+async def list_local_downloads():
+    """
+    列出项目 `downloads` 目录下允许处理的视频文件（简单白名单扩展名过滤）。
+    """
+    try:
+        downloads_dir = PROJECT_ROOT / 'downloads'
+        if not downloads_dir.exists():
+            return {"files": []}
+
+        allowed_exts = {'.mp4', '.mkv', '.mov', '.webm', '.flv', '.avi'}
+        files = []
+        for p in downloads_dir.iterdir():
+            if p.is_file() and p.suffix.lower() in allowed_exts:
+                files.append(p.name)
+
+        return {"files": sorted(files)}
+    except Exception as e:
+        logger.error(f"列出本地文件失败: {e}")
+        raise HTTPException(status_code=500, detail="列出本地文件失败")
+
+
+@app.post("/api/upload-local")
+async def upload_local_file(file: UploadFile = File(...)):
+    """
+    上传本地文件到 `downloads` 目录并返回以 `local:downloads/xxx` 格式的路径，供前端直接触发处理。
+    """
+    try:
+        downloads_dir = PROJECT_ROOT / 'downloads'
+        downloads_dir.mkdir(exist_ok=True)
+
+        # 简单安全检查文件名
+        filename = os.path.basename(file.filename)
+        if '..' in filename or '/' in filename or '\\' in filename:
+            raise HTTPException(status_code=400, detail="文件名不合法")
+
+        destination = downloads_dir / filename
+        # 保存文件
+        async with aiofiles.open(destination, 'wb') as out_f:
+            content = await file.read()
+            await out_f.write(content)
+
+        return {"path": f"local:downloads/{filename}", "filename": filename}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"上传本地文件失败: {e}")
+        raise HTTPException(status_code=500, detail="上传失败")
 
 if __name__ == "__main__":
     import uvicorn

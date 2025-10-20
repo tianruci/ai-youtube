@@ -95,8 +95,13 @@ class VideoTranscriber {
         // 表单元素
         this.form = document.getElementById('videoForm');
         this.videoUrlInput = document.getElementById('videoUrl');
+        // 支持本地文件选择提示：用户可输入 local:downloads/filename.mp4
         this.summaryLanguageSelect = document.getElementById('summaryLanguage');
         this.submitBtn = document.getElementById('submitBtn');
+        this.localFilesSelect = document.getElementById('localFiles');
+        this.uploadFileInput = document.getElementById('uploadFile');
+        this.uploadProgressWrap = document.getElementById('uploadProgressWrap');
+        this.uploadProgressBar = document.getElementById('uploadProgressBar');
         
         // 进度元素
         this.progressSection = document.getElementById('progressSection');
@@ -170,6 +175,70 @@ class VideoTranscriber {
         this.langToggle.addEventListener('click', () => {
             this.toggleLanguage();
         });
+
+        // 本地文件下拉选择：填充到输入框并触发处理提示
+        if (this.localFilesSelect) {
+            this.localFilesSelect.addEventListener('change', () => {
+                const val = this.localFilesSelect.value;
+                if (val) {
+                    this.videoUrlInput.value = `local:downloads/${val}`;
+                }
+            });
+        }
+
+        // 上传文件：上传到后端并在完成后选中
+        if (this.uploadFileInput) {
+            this.uploadFileInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                // 使用 XMLHttpRequest 显示上传进度
+                const xhr = new XMLHttpRequest();
+                const form = new FormData();
+                form.append('file', file);
+
+                xhr.open('POST', `${this.apiBase}/upload-local`, true);
+
+                xhr.upload.onprogress = (event) => {
+                    if (event.lengthComputable) {
+                        const percent = Math.round((event.loaded / event.total) * 100);
+                        if (this.uploadProgressWrap) this.uploadProgressWrap.style.display = 'block';
+                        if (this.uploadProgressBar) this.uploadProgressBar.style.width = percent + '%';
+                    }
+                };
+
+                xhr.onload = async () => {
+                    try {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            const data = JSON.parse(xhr.responseText);
+                            const opt = document.createElement('option');
+                            opt.value = data.filename;
+                            opt.text = data.filename;
+                            this.localFilesSelect.appendChild(opt);
+                            this.localFilesSelect.value = data.filename;
+                            this.videoUrlInput.value = data.path;
+                        } else {
+                            let errMsg = '上传失败';
+                            try { errMsg = JSON.parse(xhr.responseText).detail || errMsg; } catch(_){}
+                            this.showError(this.t('error_download_failed') + errMsg);
+                        }
+                    } catch (e) {
+                        console.error('上传响应处理失败', e);
+                    } finally {
+                        if (this.uploadProgressWrap) {
+                            setTimeout(() => { this.uploadProgressWrap.style.display = 'none'; if (this.uploadProgressBar) this.uploadProgressBar.style.width = '0%'; }, 800);
+                        }
+                    }
+                };
+
+                xhr.onerror = () => {
+                    this.showError(this.t('error_download_failed') + 'Network error');
+                    if (this.uploadProgressWrap) { this.uploadProgressWrap.style.display = 'none'; if (this.uploadProgressBar) this.uploadProgressBar.style.width = '0%'; }
+                };
+
+                xhr.send(form);
+            });
+        }
     }
     
     initializeLanguage() {
@@ -240,6 +309,7 @@ class VideoTranscriber {
             
             // 发送转录请求
             const formData = new FormData();
+            // 如果用户输入以 local: 开头，直接传给后台处理本地文件
             formData.append('url', videoUrl);
             formData.append('summary_language', summaryLanguage);
             
@@ -787,6 +857,25 @@ document.addEventListener('DOMContentLoaded', () => {
             urlInput.placeholder = '请输入YouTube、Bilibili等平台的视频链接...';
         }
     });
+
+    // 页面加载完成后，自动获取本地 downloads 列表并填充下拉
+    (async () => {
+        try {
+            const resp = await fetch('/api/local-files');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const select = document.getElementById('localFiles');
+            if (!select) return;
+            data.files.forEach(fname => {
+                const opt = document.createElement('option');
+                opt.value = fname;
+                opt.text = fname;
+                select.appendChild(opt);
+            });
+        } catch (e) {
+            console.error('加载本地文件列表失败', e);
+        }
+    })();
 });
 
 // 处理页面刷新时的清理工作

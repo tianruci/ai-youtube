@@ -161,3 +161,34 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"获取视频信息失败: {str(e)}")
             raise Exception(f"获取视频信息失败: {str(e)}")
+
+    async def convert_local_video(self, local_video_path: Path, output_dir: Path) -> tuple[str, str]:
+        """
+        将本地视频文件提取音频并转换为m4a，返回音频路径和视频标题（文件名）。
+        仅允许项目下的文件路径。
+        """
+        try:
+            # 确保输入存在
+            if not local_video_path.exists():
+                raise Exception(f"本地视频文件不存在: {local_video_path}")
+
+            # 创建输出目录
+            output_dir.mkdir(exist_ok=True)
+
+            import uuid, subprocess
+            unique_id = str(uuid.uuid4())[:8]
+            out_audio = output_dir / f"audio_{unique_id}.m4a"
+
+            # 使用 ffmpeg 提取音频并转换为设定的参数
+            cmd = [
+                "ffmpeg", "-y", "-i", str(local_video_path),
+                "-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "160k",
+                str(out_audio)
+            ]
+            subprocess.check_call(cmd)
+
+            video_title = local_video_path.stem
+            return str(out_audio), video_title
+        except Exception as e:
+            logger.error(f"处理本地视频失败: {e}")
+            raise
