@@ -2,7 +2,9 @@ class VideoTranscriber {
     constructor() {
         this.currentTaskId = null;
         this.eventSource = null;
-        this.apiBase = 'http://localhost:8000/api';
+        // Use relative API base so the frontend works behind proxies/tunnels
+        // If running in development with a separate backend, set window.__API_BASE__ = 'http://localhost:8000/api'
+        this.apiBase = window.__API_BASE__ || '/api';
         this.currentLanguage = 'en'; // 默认英文
         
         // 智能进度模拟相关
