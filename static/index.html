@@ -549,6 +549,11 @@
         </div>
     </div>
 
+    <script>
+        // Ensure the frontend uses the same-origin API base when served through a tunnel/proxy.
+        // This prevents insecure mixed-content requests to http://localhost:8000 from an https page.
+        window.__API_BASE__ = window.__API_BASE__ || '/api';
+    </script>
     <script src="/static/app.js?v=20250829"></script>
 </body>
 </html>
