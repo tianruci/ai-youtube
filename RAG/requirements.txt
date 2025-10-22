@@ -1,0 +1,7 @@
+sentence-transformers>=2.2.2
+chromadb>=0.4.3
+requests>=2.31.0
+numpy
+python-dotenv
+
+
