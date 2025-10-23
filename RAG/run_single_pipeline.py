@@ -1,6 +1,7 @@
 import sys
 import os
 from pathlib import Path
+import concurrent.futures
 
 # Ensure project root is on sys.path so imports like `from RAG import transcribe` work
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,17 @@ def process_video(video_path: Path):
     wav_path = trans_dir / (name + '.wav')
     transcript_path = trans_dir / (name + '.json')
     chunk_path = chunks_dir / (name + '_chunks.json')
+
+    # compute stable content hash for deduplication (sha256)
+    def compute_sha256(path, block_size=65536):
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for chunk in iter(lambda: f.read(block_size), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+    video_hash = compute_sha256(video_path)
 
     # 1. extract audio
     def extract_audio(video_path, out_wav):
@@ -126,12 +138,27 @@ def process_video(video_path: Path):
         from sentence_transformers import SentenceTransformer
         import chromadb
         from chromadb.config import Settings
+        from pathlib import Path as _Path
         MODEL_NAME = os.getenv('EMBED_MODEL', 'all-MiniLM-L6-v2')
         DB_DIR_LOCAL = os.getenv('CHROMA_DIR', './RAG/rag_db')
         print('Indexing', path)
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         videos = data if isinstance(data, list) else [data]
+        # dedup check: maintain a simple list of indexed video hashes in DB_DIR
+        DB_META = _Path(DB_DIR_LOCAL) / 'indexed_videos.json'
+        try:
+            if DB_META.exists():
+                existing_indexed = json.loads(DB_META.read_text(encoding='utf-8'))
+            else:
+                existing_indexed = []
+        except Exception:
+            existing_indexed = []
+        video_ids = [v.get('video_id') for v in videos if v.get('video_id')]
+        for vid in video_ids:
+            if vid in existing_indexed:
+                print('Video', vid, 'already indexed in', DB_DIR_LOCAL, ', skipping')
+                return
         embed_model = SentenceTransformer(MODEL_NAME)
         try:
             client = chromadb.Client(Settings(chroma_db_impl='duckdb+parquet', persist_directory=DB_DIR_LOCAL))
@@ -179,6 +206,15 @@ def process_video(video_path: Path):
                 collection.persist()
             except Exception:
                 pass
+        # record indexed video ids for future dedup checks
+        try:
+            for vid in video_ids:
+                if vid and vid not in existing_indexed:
+                    existing_indexed.append(vid)
+            _Path(DB_DIR_LOCAL).mkdir(parents=True, exist_ok=True)
+            DB_META.write_text(json.dumps(existing_indexed, ensure_ascii=False, indent=2), encoding='utf-8')
+        except Exception:
+            pass
 
     # Execute steps: extract audio, transcribe, chunk, index
     # 1. extract audio if needed
@@ -243,11 +279,22 @@ def main():
     if not paths:
         print('No video files found to process in', downloads)
         sys.exit(0)
-    for p in paths:
-        print('Processing', p.name)
-        ok = process_video(p)
-        if not ok:
-            print('Processing failed for', p.name)
+    # Parallelize processing across multiple CPU processes. Keep CPU-only transcription.
+    # Conservative default for CPU-only, moderate memory machines (e.g. 32GB)
+    # Use a small number of worker processes to avoid heavy CPU and memory contention.
+    max_workers = 2
+    print(f'Processing {len(paths)} file(s) with {max_workers} worker(s) (CPU-only conservative setting)')
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_path = {executor.submit(process_video, p): p for p in paths}
+        for future in concurrent.futures.as_completed(future_to_path):
+            p = future_to_path[future]
+            try:
+                ok = future.result()
+            except Exception as e:
+                print('Processing raised exception for', p.name, ':', e)
+            else:
+                if not ok:
+                    print('Processing failed for', p.name)
     print('All done')
 
 
