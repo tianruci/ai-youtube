@@ -2,12 +2,6 @@ import sys
 import os
 from pathlib import Path
 
-# Mitigate OpenMP runtime conflicts (safe default for most CPU-only setups)
-# Do not override if user explicitly set these env vars
-os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
-os.environ.setdefault('OMP_NUM_THREADS', os.environ.get('OMP_NUM_THREADS', '1'))
-os.environ.setdefault('MKL_NUM_THREADS', os.environ.get('MKL_NUM_THREADS', '1'))
-
 # Ensure project root is on sys.path so imports like `from RAG import transcribe` work
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -29,16 +23,8 @@ Environment:
 """
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python RAG/run_single_pipeline.py <video_path>")
-        sys.exit(1)
-
-    video_path = Path(sys.argv[1])
-    if not video_path.exists():
-        print("Video not found:", video_path)
-        sys.exit(1)
-
+def process_video(video_path: Path):
+    """Process one video file through the pipeline."""
     project_root = Path(__file__).resolve().parents[1]
     rag_dir = project_root / 'RAG'
     audio_dir = rag_dir / 'audio'
@@ -53,7 +39,6 @@ def main():
     transcript_path = trans_dir / (name + '.json')
     chunk_path = chunks_dir / (name + '_chunks.json')
 
-    # Inline helpers to make this script standalone and allow removing other helper files
     # 1. extract audio
     def extract_audio(video_path, out_wav):
         out_wav.parent.mkdir(parents=True, exist_ok=True)
@@ -68,10 +53,10 @@ def main():
         tmpdir.mkdir(parents=True, exist_ok=True)
         device = os.getenv('TRANSCRIBE_DEVICE', 'cpu')
         compute_type = os.getenv('TRANSCRIBE_COMPUTE_TYPE', 'float32')
-
         # Try faster-whisper first (Python API)
         try:
             from faster_whisper import WhisperModel
+            print('Using faster-whisper for transcription (this may take some time)...')
             model = WhisperModel("small", device=device, compute_type=compute_type)
             segments, info = model.transcribe(str(wav_path), beam_size=5)
             segs = []
@@ -79,10 +64,10 @@ def main():
                 segs.append({"start": float(s.start), "end": float(s.end), "text": s.text})
             out = {"video_id": wav_path.stem, "segments": segs}
             out_json.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
+            print(f'Transcription finished: {len(segs)} segments')
             return
         except Exception as e:
             # If faster-whisper not available or failed, try whisperx CLI
-            # print a warning and fall back
             print('faster-whisper unavailable or failed, falling back to whisperx CLI:', e)
 
         # Fallback: whisperx CLI
@@ -92,6 +77,7 @@ def main():
             '--compute_type', compute_type,
             '--output_format', 'json', '--output_dir', str(tmpdir)
         ]
+        print('Calling whisperx CLI for transcription...')
         subprocess.check_call(cmd)
         candidate = tmpdir / (wav_path.stem + '.json')
         if not candidate.exists():
@@ -102,6 +88,7 @@ def main():
             segments.append({'start': seg['start'], 'end': seg['end'], 'text': seg['text']})
         out = {'video_id': wav_path.stem, 'segments': segments}
         out_json.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(f'whisperx transcription finished: {len(segments)} segments')
 
     # 3. chunk helpers
     def load_transcript(path):
@@ -155,15 +142,36 @@ def main():
         except Exception:
             collection = client.create_collection('videos')
         import uuid
+        # Batch encode all chunks and show progress
+        all_texts = []
+        all_metas = []
+        all_ids = []
         for v in videos:
             vid = v.get('video_id')
             for c in v.get('chunks', []):
-                cid = str(uuid.uuid4())
                 text = c.get('text')
                 start = c.get('start')
                 end = c.get('end')
-                emb = embed_model.encode(text).tolist()
-                collection.add(documents=[text], metadatas=[{'video_id': vid, 'start': start, 'end': end}], ids=[cid], embeddings=[emb])
+                all_texts.append(text)
+                all_metas.append({'video_id': vid, 'start': start, 'end': end})
+                all_ids.append(str(uuid.uuid4()))
+        if all_texts:
+            print(f'Encoding {len(all_texts)} chunks using {MODEL_NAME} (this may show a progress bar)...')
+            embeddings = embed_model.encode(all_texts, show_progress_bar=True)
+            # ensure embeddings is a plain Python list of lists (chroma requires list)
+            try:
+                embeddings = embeddings.tolist()
+            except Exception:
+                embeddings = list(embeddings)
+            # add in batches to the collection
+            batch_size = 512
+            for i in range(0, len(all_texts), batch_size):
+                j = i + batch_size
+                docs = all_texts[i:j]
+                metas = all_metas[i:j]
+                ids = all_ids[i:j]
+                embs = embeddings[i:j]
+                collection.add(documents=docs, metadatas=metas, ids=ids, embeddings=embs)
         try:
             client.persist()
         except Exception:
@@ -172,84 +180,75 @@ def main():
             except Exception:
                 pass
 
-    # Try to import tqdm for progress bars; provide a lightweight fallback if missing
-    try:
-        from tqdm import tqdm
-    except Exception:
-        class _NoopTqdm:
-            def __init__(self, iterable=None, **kwargs):
-                self._iterable = iterable
-            def __call__(self, iterable=None, **kwargs):
-                return iter(iterable) if iterable is not None else self
-            def __iter__(self):
-                return iter(self._iterable) if self._iterable is not None else iter(())
-            def update(self, n=1):
-                pass
-            def set_description(self, desc):
-                pass
-            def close(self):
-                pass
-            def __enter__(self):
-                return self
-            def __exit__(self, exc_type, exc, tb):
-                return False
-        def tqdm(iterable=None, **kwargs):
-            if iterable is None:
-                return _NoopTqdm()
-            return iter(iterable)
-
-    # Execute steps: extract audio, transcribe, chunk, index with a pipeline-level progress bar
-    total_steps = 4
-    with tqdm(total=total_steps, desc='Pipeline') as pipeline_bar:
-        # 1. extract audio if needed
-        if not wav_path.exists():
-            try:
-                print('Step 1/{}/Extracting audio ->'.format(total_steps), wav_path)
-                extract_audio(video_path, wav_path)
-            except Exception as e:
-                print('ffmpeg audio extraction failed:', e)
-                sys.exit(1)
-        else:
-            print('Audio already exists:', wav_path)
-        pipeline_bar.update(1)
-
-        # 2. transcribe
-        if not transcript_path.exists():
-            try:
-                print('Step 2/{}/Transcribing ->'.format(total_steps), transcript_path)
-                run_whisperx(wav_path, transcript_path)
-            except Exception as e:
-                print('Transcription failed:', e)
-                print("You can set TRANSCRIBE_DEVICE='cpu' and TRANSCRIBE_COMPUTE_TYPE='float32' to force CPU")
-                sys.exit(1)
-        else:
-            print('Transcript already exists:', transcript_path)
-        pipeline_bar.update(1)
-
-        # 3. chunk
-        if not chunk_path.exists():
-            try:
-                print('Step 3/{}/Chunking transcript ->'.format(total_steps), chunk_path)
-                trans = load_transcript(transcript_path)
-                chunks = chunk_by_time(trans, window=30.0, overlap=5.0)
-                write_chunks(chunks, chunk_path)
-            except Exception as e:
-                print('Chunking failed:', e)
-                sys.exit(1)
-        else:
-            print('Chunks already exist:', chunk_path)
-        pipeline_bar.update(1)
-
-        # 4. index
+    # Execute steps: extract audio, transcribe, chunk, index
+    # 1. extract audio if needed
+    if not wav_path.exists():
         try:
-            print('Step 4/{}/Indexing chunks -> using CHROMA_DIR='.format(total_steps), os.getenv('CHROMA_DIR', './RAG/rag_db'))
-            index_file(str(chunk_path))
+            print('Extracting audio ->', wav_path)
+            extract_audio(video_path, wav_path)
         except Exception as e:
-            print('Indexing failed:', e)
-            sys.exit(1)
-        pipeline_bar.update(1)
+            print('ffmpeg audio extraction failed:', e)
+            return False
+    else:
+        print('Audio already exists:', wav_path)
 
-    print('Pipeline completed. Chroma DB at', os.getenv('CHROMA_DIR', './RAG/rag_db'))
+    # 2. transcribe
+    if not transcript_path.exists():
+        try:
+            print('Transcribing ->', transcript_path)
+            run_whisperx(wav_path, transcript_path)
+        except Exception as e:
+            print('Transcription failed:', e)
+            print("You can set TRANSCRIBE_DEVICE='cpu' and TRANSCRIBE_COMPUTE_TYPE='float32' to force CPU")
+            return False
+    else:
+        print('Transcript already exists:', transcript_path)
+
+    # 3. chunk
+    if not chunk_path.exists():
+        try:
+            print('Chunking transcript ->', chunk_path)
+            trans = load_transcript(transcript_path)
+            chunks = chunk_by_time(trans, window=30.0, overlap=5.0)
+            write_chunks(chunks, chunk_path)
+        except Exception as e:
+            print('Chunking failed:', e)
+            return False
+    else:
+        print('Chunks already exist:', chunk_path)
+
+    # 4. index
+    try:
+        print('Indexing chunks -> using CHROMA_DIR=', os.getenv('CHROMA_DIR', './RAG/rag_db'))
+        index_file(str(chunk_path))
+    except Exception as e:
+        print('Indexing failed:', e)
+        return False
+
+    print('Pipeline completed for', video_path.name, '. Chroma DB at', os.getenv('CHROMA_DIR', './RAG/rag_db'))
+    return True
+
+
+def main():
+    project_root = Path(__file__).resolve().parents[1]
+    downloads = project_root / 'downloads'
+    # If user provided file(s), process those, otherwise process all mp4 in downloads
+    if len(sys.argv) >= 2:
+        paths = [Path(p) for p in sys.argv[1:]]
+    else:
+        if not downloads.exists():
+            print('Downloads folder not found:', downloads)
+            sys.exit(1)
+        paths = [p for p in downloads.iterdir() if p.suffix.lower() in {'.mp4', '.mkv', '.mov', '.avi'}]
+    if not paths:
+        print('No video files found to process in', downloads)
+        sys.exit(0)
+    for p in paths:
+        print('Processing', p.name)
+        ok = process_video(p)
+        if not ok:
+            print('Processing failed for', p.name)
+    print('All done')
 
 
 if __name__ == '__main__':
