@@ -23,14 +23,11 @@ Requirements:
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DOWNLOADS = PROJECT_ROOT / 'downloads'
 RAG_DIR = PROJECT_ROOT / 'RAG'
-AUDIO_DIR = RAG_DIR / 'audio'
-TRANS_DIR = RAG_DIR / 'transcripts'
-CHUNK_DIR = RAG_DIR / 'chunks'
+DATA_DIR = RAG_DIR / 'data'
 
 
 def ensure_dirs():
-    for d in [AUDIO_DIR, TRANS_DIR, CHUNK_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def video_files():
@@ -45,16 +42,16 @@ def run():
     for vid in video_files():
         name = vid.stem
         print('Processing', vid.name)
-        wav_out = AUDIO_DIR / (name + '.wav')
+        wav_out = DATA_DIR / (name + '.wav')
         # extract audio
         if not wav_out.exists():
             subprocess.check_call(['ffmpeg', '-y', '-i', str(vid), '-vn', '-ac', '1', '-ar', '16000', str(wav_out)])
         # transcribe
-        trans_out = TRANS_DIR / (name + '.json')
+        trans_out = DATA_DIR / (name + '.json')
         if not trans_out.exists():
             subprocess.check_call(['python', str(RAG_DIR / 'transcribe.py'), str(wav_out), str(trans_out)])
         # chunk
-        chunk_out = CHUNK_DIR / (name + '_chunks.json')
+        chunk_out = DATA_DIR / (name + '_chunks.json')
         if not chunk_out.exists():
             subprocess.check_call(['python', str(RAG_DIR / 'chunk.py'), str(trans_out), str(chunk_out)])
         # index

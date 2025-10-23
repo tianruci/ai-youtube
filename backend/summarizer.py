@@ -2,6 +2,13 @@ import os
 import openai
 import logging
 from typing import Optional
+from pathlib import Path
+import json
+try:
+    import requests
+    _HAS_REQUESTS = True
+except Exception:
+    _HAS_REQUESTS = False
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,25 @@ class Summarizer:
             "ko": "한국어",
             "ar": "العربية"
         }
+        # 本地摘要模型支持：优先使用环境变量 SUMMARY_MODEL，其次在项目 model/ 下寻找非-Whisper 模型目录
+        self.local_model_path = None
+        self.local_endpoint = os.getenv('LLAMA_API_ENDPOINT', os.getenv('SUMMARY_MODEL_ENDPOINT', 'http://localhost:8080/v1/generate'))
+        try:
+            model_env = os.getenv('SUMMARY_MODEL')
+            if model_env:
+                self.local_model_path = model_env
+            else:
+                project_root = Path(__file__).resolve().parents[1]
+                model_root = project_root / 'model'
+                if model_root.exists() and model_root.is_dir():
+                    # prefer directories that don't look like whisper models
+                    candidates = [p for p in model_root.iterdir() if p.is_dir()]
+                    if candidates:
+                        non_whisper = [p for p in candidates if 'whisper' not in p.name.lower()]
+                        pick = non_whisper[0] if non_whisper else candidates[0]
+                        self.local_model_path = str(pick)
+        except Exception:
+            self.local_model_path = None
     
     async def optimize_transcript(self, raw_transcript: str) -> str:
         """

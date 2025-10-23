@@ -28,17 +28,40 @@ def process_video(video_path: Path):
     """Process one video file through the pipeline."""
     project_root = Path(__file__).resolve().parents[1]
     rag_dir = project_root / 'RAG'
-    audio_dir = rag_dir / 'audio'
-    trans_dir = rag_dir / 'transcripts'
-    chunks_dir = rag_dir / 'chunks'
+    data_dir = rag_dir / 'data'
 
-    for d in (audio_dir, trans_dir, chunks_dir):
-        d.mkdir(parents=True, exist_ok=True)
+    # ensure unified data dir exists
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # migrate old folders (audio, transcripts, chunks) into data dir if they exist
+    try:
+        for old in ('audio', 'transcripts', 'chunks'):
+            old_dir = rag_dir / old
+            if old_dir.exists() and old_dir.is_dir():
+                for p in old_dir.iterdir():
+                    target = data_dir / p.name
+                    if not target.exists():
+                        try:
+                            p.rename(target)
+                        except Exception:
+                            # fallback to copy for cross-filesystem
+                            import shutil
+                            if p.is_dir():
+                                shutil.copytree(p, target)
+                            else:
+                                shutil.copy2(p, target)
+                # attempt to remove old dir if empty
+                try:
+                    old_dir.rmdir()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     name = video_path.stem
-    wav_path = trans_dir / (name + '.wav')
-    transcript_path = trans_dir / (name + '.json')
-    chunk_path = chunks_dir / (name + '_chunks.json')
+    wav_path = data_dir / (name + '.wav')
+    transcript_path = data_dir / (name + '.json')
+    chunk_path = data_dir / (name + '_chunks.json')
 
     # compute stable content hash for deduplication (sha256)
     def compute_sha256(path, block_size=65536):
@@ -65,11 +88,32 @@ def process_video(video_path: Path):
         tmpdir.mkdir(parents=True, exist_ok=True)
         device = os.getenv('TRANSCRIBE_DEVICE', 'cpu')
         compute_type = os.getenv('TRANSCRIBE_COMPUTE_TYPE', 'float32')
+        # Prefer an explicitly provided local model path to avoid downloading from HF
+        model_env = os.getenv('TRANSCRIBE_MODEL')
+        model_to_use = None
+        if model_env:
+            model_to_use = model_env
+        else:
+            # look for local models under project_root/model
+            try:
+                model_root = project_root / 'model'
+                if model_root.exists() and model_root.is_dir():
+                    # prefer whisper-small style directory names
+                    candidates = [p for p in model_root.iterdir() if p.is_dir() and 'whisper' in p.name.lower()]
+                    if candidates:
+                        # prefer ones containing 'small', else pick first
+                        smalls = [p for p in candidates if 'small' in p.name.lower()]
+                        model_to_use = str(smalls[0] if smalls else candidates[0])
+            except Exception:
+                model_to_use = None
         # Try faster-whisper first (Python API)
         try:
             from faster_whisper import WhisperModel
             print('Using faster-whisper for transcription (this may take some time)...')
-            model = WhisperModel("small", device=device, compute_type=compute_type)
+            # If a local model path was found, pass it to WhisperModel to avoid HF download
+            model_name_or_path = model_to_use or "small"
+            print('Whisper model source:', model_name_or_path)
+            model = WhisperModel(model_name_or_path, device=device, compute_type=compute_type)
             segments, info = model.transcribe(str(wav_path), beam_size=5)
             segs = []
             for s in segments:

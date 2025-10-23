@@ -7,24 +7,24 @@ python start.py
 
 下面按你要的四步给出可直接复制的 PowerShell 命令（假设项目根为 `D:\projects\ai-youtube`，视频在 `.\downloads`，并且你已激活 `conda` 环境或所需虚拟环境ai-youtube）。
 
-1) 视频 → 转录（生成带时间戳的 JSON，输出到 `RAG/transcripts`）  
-- 推荐在无 GPU 的情况下强制 CPU + float32：
+1) 视频 → 转录（生成带时间戳的 JSON，输出到 `RAG/data`）  
+-- 推荐在无 GPU 的情况下强制 CPU + float32：
 ```powershell
 $env:TRANSCRIBE_DEVICE='cpu'
 $env:TRANSCRIBE_COMPUTE_TYPE='float32'
-python RAG\transcribe.py .\downloads\my_video.mp4 .\RAG\transcripts\my_video.json
+python RAG\transcribe.py .\downloads\my_video.mp4 .\RAG\data\my_video.json
 ```
 - 说明：输入视频 `.\downloads\my_video.mp4`，输出 `.\RAG\transcripts\my_video.json`（包含 segments: start,end,text）。
 
-2) 转录 JSON → 切片（chunk，输出到 `RAG/chunks`）  
+2) 转录 JSON → 切片（chunk，输出到 `RAG/data`）  
 ```powershell
-python RAG\chunk.py .\RAG\transcripts\my_video.json .\RAG\chunks\my_video_chunks.json --window 30 --overlap 5
+python RAG\chunk.py .\RAG\data\my_video.json .\RAG\data\my_video_chunks.json --window 30 --overlap 5
 ```
 - 说明：`--window` 为每个 chunk 的时间窗（秒），`--overlap` 为重叠秒数；输出为 `.\RAG\chunks\my_video_chunks.json`（`index_data.py` 可读格式）。
 
 3) 切片 → 生成 embeddings 并存入向量库（持久化到 `RAG/rag_db`）  
 ```powershell
-python RAG\index_data.py .\RAG\chunks\my_video_chunks.json
+python RAG\index_data.py .\RAG\data\my_video_chunks.json
 ```
 - 说明：会读取 chunk JSON、用 `sentence-transformers` 生成 embedding 并把数据写入默认目录 `./RAG/rag_db`（或由环境变量 `CHROMA_DIR` 覆盖）。
 
