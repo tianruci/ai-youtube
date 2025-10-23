@@ -3,6 +3,7 @@ import json
 import uuid
 from sentence_transformers import SentenceTransformer
 import chromadb
+from chromadb.config import Settings
 
 """
 Index transcript chunks into ChromaDB.
@@ -40,7 +41,20 @@ def index_file(path):
     print(f"Indexing {path}")
     videos = load_input(path)
     embed_model = SentenceTransformer(MODEL_NAME)
-    client = chromadb.Client()
+    # initialize persistent Chroma client using duckdb+parquet backend
+    try:
+        client = chromadb.Client(Settings(
+            chroma_db_impl="duckdb+parquet",
+            persist_directory=DB_DIR
+        ))
+    except ValueError as e:
+        # Newer chromadb versions may require migration or different client construction.
+        # Fall back to in-memory client and warn the user with remediation steps.
+        print("Warning: chromadb persistent client construction failed:", e)
+        print("Falling back to in-memory Chroma. To enable persistence, either: ")
+        print("  1) Install and run the migration tool: pip install chroma-migrate && chroma-migrate")
+        print("  2) Or pin chromadb to a compatible version, e.g.: pip install 'chromadb<0.4.0'\n")
+        client = chromadb.Client()
     try:
         collection = client.get_collection("videos")
     except Exception:
@@ -60,6 +74,15 @@ def index_file(path):
                 ids=[cid],
                 embeddings=[emb],
             )
+    # persist DB to disk
+    try:
+        client.persist()
+    except Exception:
+        # older chromadb versions expose persist on the collection
+        try:
+            collection.persist()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
