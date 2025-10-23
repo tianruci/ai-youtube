@@ -21,7 +21,7 @@ This script will create/append to a Chroma collection named 'videos'.
 """
 
 MODEL_NAME = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
-DB_DIR = os.getenv("CHROMA_DIR", "./rag_db")
+DB_DIR = os.getenv("CHROMA_DIR", "./RAG/rag_db")
 
 
 def load_input(path):

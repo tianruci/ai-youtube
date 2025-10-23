@@ -1,1 +1,44 @@
 python start.py
+
+模型学习的四个步骤（不是微调！）
+
+视频转录 → 切片 → 生成 embeddings → 存入向量库
+
+
+下面按你要的四步给出可直接复制的 PowerShell 命令（假设项目根为 `D:\projects\ai-youtube`，视频在 `.\downloads`，并且你已激活 `conda` 环境或所需虚拟环境ai-youtube）。
+
+1) 视频 → 转录（生成带时间戳的 JSON，输出到 `RAG/transcripts`）  
+- 推荐在无 GPU 的情况下强制 CPU + float32：
+```powershell
+$env:TRANSCRIBE_DEVICE='cpu'
+$env:TRANSCRIBE_COMPUTE_TYPE='float32'
+python RAG\transcribe.py .\downloads\my_video.mp4 .\RAG\transcripts\my_video.json
+```
+- 说明：输入视频 `.\downloads\my_video.mp4`，输出 `.\RAG\transcripts\my_video.json`（包含 segments: start,end,text）。
+
+2) 转录 JSON → 切片（chunk，输出到 `RAG/chunks`）  
+```powershell
+python RAG\chunk.py .\RAG\transcripts\my_video.json .\RAG\chunks\my_video_chunks.json --window 30 --overlap 5
+```
+- 说明：`--window` 为每个 chunk 的时间窗（秒），`--overlap` 为重叠秒数；输出为 `.\RAG\chunks\my_video_chunks.json`（`index_data.py` 可读格式）。
+
+3) 切片 → 生成 embeddings 并存入向量库（持久化到 `RAG/rag_db`）  
+```powershell
+python RAG\index_data.py .\RAG\chunks\my_video_chunks.json
+```
+- 说明：会读取 chunk JSON、用 `sentence-transformers` 生成 embedding 并把数据写入默认目录 `./RAG/rag_db`（或由环境变量 `CHROMA_DIR` 覆盖）。
+
+4) （验证）检索并让模型基于检索结果回答  
+```powershell
+$env:LLAMA_API_ENDPOINT='http://localhost:8080/v1/generate'
+python RAG\query_rag.py "请简要概述这段视频的主要内容。"
+```
+- 说明：此命令会从 `RAG/rag_db` 检索 top‑k 片段并把它们拼入 prompt，调用本地 `llama-server`（Qwen3）生成答案。
+
+一次性处理 downloads 下所有视频（可选）  
+```powershell
+python RAG\pipeline_index.py
+```
+- 说明：会对 `.\downloads` 中每个视频执行抽音→转录→切片→索引（依赖 ffmpeg & transcribe 配置）。
+
+如果某步失败，把对应命令的 stdout/stderr 贴给我，我会帮你定位下一步怎么修复。
