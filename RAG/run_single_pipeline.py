@@ -172,50 +172,82 @@ def main():
             except Exception:
                 pass
 
-    # Execute steps: extract audio, transcribe, chunk, index
-    # 1. extract audio if needed
-    if not wav_path.exists():
-        try:
-            print('Extracting audio ->', wav_path)
-            extract_audio(video_path, wav_path)
-        except Exception as e:
-            print('ffmpeg audio extraction failed:', e)
-            sys.exit(1)
-    else:
-        print('Audio already exists:', wav_path)
-
-    # 2. transcribe
-    if not transcript_path.exists():
-        try:
-            print('Transcribing ->', transcript_path)
-            run_whisperx(wav_path, transcript_path)
-        except Exception as e:
-            print('Transcription failed:', e)
-            print("You can set TRANSCRIBE_DEVICE='cpu' and TRANSCRIBE_COMPUTE_TYPE='float32' to force CPU")
-            sys.exit(1)
-    else:
-        print('Transcript already exists:', transcript_path)
-
-    # 3. chunk
-    if not chunk_path.exists():
-        try:
-            print('Chunking transcript ->', chunk_path)
-            trans = load_transcript(transcript_path)
-            chunks = chunk_by_time(trans, window=30.0, overlap=5.0)
-            write_chunks(chunks, chunk_path)
-        except Exception as e:
-            print('Chunking failed:', e)
-            sys.exit(1)
-    else:
-        print('Chunks already exist:', chunk_path)
-
-    # 4. index
+    # Try to import tqdm for progress bars; provide a lightweight fallback if missing
     try:
-        print('Indexing chunks -> using CHROMA_DIR=', os.getenv('CHROMA_DIR', './RAG/rag_db'))
-        index_file(str(chunk_path))
-    except Exception as e:
-        print('Indexing failed:', e)
-        sys.exit(1)
+        from tqdm import tqdm
+    except Exception:
+        class _NoopTqdm:
+            def __init__(self, iterable=None, **kwargs):
+                self._iterable = iterable
+            def __call__(self, iterable=None, **kwargs):
+                return iter(iterable) if iterable is not None else self
+            def __iter__(self):
+                return iter(self._iterable) if self._iterable is not None else iter(())
+            def update(self, n=1):
+                pass
+            def set_description(self, desc):
+                pass
+            def close(self):
+                pass
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+        def tqdm(iterable=None, **kwargs):
+            if iterable is None:
+                return _NoopTqdm()
+            return iter(iterable)
+
+    # Execute steps: extract audio, transcribe, chunk, index with a pipeline-level progress bar
+    total_steps = 4
+    with tqdm(total=total_steps, desc='Pipeline') as pipeline_bar:
+        # 1. extract audio if needed
+        if not wav_path.exists():
+            try:
+                print('Step 1/{}/Extracting audio ->'.format(total_steps), wav_path)
+                extract_audio(video_path, wav_path)
+            except Exception as e:
+                print('ffmpeg audio extraction failed:', e)
+                sys.exit(1)
+        else:
+            print('Audio already exists:', wav_path)
+        pipeline_bar.update(1)
+
+        # 2. transcribe
+        if not transcript_path.exists():
+            try:
+                print('Step 2/{}/Transcribing ->'.format(total_steps), transcript_path)
+                run_whisperx(wav_path, transcript_path)
+            except Exception as e:
+                print('Transcription failed:', e)
+                print("You can set TRANSCRIBE_DEVICE='cpu' and TRANSCRIBE_COMPUTE_TYPE='float32' to force CPU")
+                sys.exit(1)
+        else:
+            print('Transcript already exists:', transcript_path)
+        pipeline_bar.update(1)
+
+        # 3. chunk
+        if not chunk_path.exists():
+            try:
+                print('Step 3/{}/Chunking transcript ->'.format(total_steps), chunk_path)
+                trans = load_transcript(transcript_path)
+                chunks = chunk_by_time(trans, window=30.0, overlap=5.0)
+                write_chunks(chunks, chunk_path)
+            except Exception as e:
+                print('Chunking failed:', e)
+                sys.exit(1)
+        else:
+            print('Chunks already exist:', chunk_path)
+        pipeline_bar.update(1)
+
+        # 4. index
+        try:
+            print('Step 4/{}/Indexing chunks -> using CHROMA_DIR='.format(total_steps), os.getenv('CHROMA_DIR', './RAG/rag_db'))
+            index_file(str(chunk_path))
+        except Exception as e:
+            print('Indexing failed:', e)
+            sys.exit(1)
+        pipeline_bar.update(1)
 
     print('Pipeline completed. Chroma DB at', os.getenv('CHROMA_DIR', './RAG/rag_db'))
 
