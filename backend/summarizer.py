@@ -4,29 +4,57 @@ import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+try:
+    from llm_adapters import HTTPLLMAdapter
+except Exception:
+    HTTPLLMAdapter = None
 
 class Summarizer:
     """文本总结器，使用OpenAI API生成多语言摘要"""
     
     def __init__(self):
         """初始化总结器"""
-        # 从环境变量获取OpenAI API配置（优先使用 OPENAI_*）
+        # 从环境变量获取OpenAI API配置（优先使用 OPENAI_*），否则尝试本地 HTTP LLM
         api_key = os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL")
 
-        if not api_key:
-            logger.warning("未设置OPENAI_API_KEY环境变量，将无法使用摘要功能")
-
         if api_key:
-            model_name = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
-            if base_url:
-                self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
-                logger.info(f"OpenAI客户端已初始化，使用自定义端点: {base_url}，模型: {model_name}")
-            else:
-                self.client = openai.OpenAI(api_key=api_key)
-                logger.info(f"OpenAI客户端已初始化，使用默认端点，模型: {model_name}")
+            try:
+                import openai
+                model_name = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
+                if base_url:
+                    self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+                    logger.info(f"OpenAI客户端已初始化，使用自定义端点: {base_url}，模型: {model_name}")
+                else:
+                    self.client = openai.OpenAI(api_key=api_key)
+                    logger.info(f"OpenAI客户端已初始化，使用默认端点，模型: {model_name}")
+                self.is_local = False
+                self.local_model = None
+            except Exception as e:
+                logger.error(f"初始化OpenAI客户端失败: {e}")
+                self.client = None
+                self.is_local = False
+                self.local_model = None
         else:
-            self.client = None
+            local_api = os.getenv("LOCAL_LLM_API_URL")
+            local_model = os.getenv("LOCAL_LLM_MODEL_NAME")
+            if local_api and HTTPLLMAdapter is not None:
+                try:
+                    self.client = HTTPLLMAdapter(api_url=local_api, model=local_model)
+                    self.is_local = True
+                    self.local_model = local_model
+                    logger.info(f"本地LLM适配器已初始化，endpoint: {local_api}, model: {local_model}")
+                except Exception as e:
+                    logger.error(f"初始化本地LLM适配器失败: {e}")
+                    self.client = None
+                    self.is_local = False
+                    self.local_model = None
+            else:
+                if not local_api:
+                    logger.warning("未设置 OPENAI_API_KEY 且未配置 LOCAL_LLM_API_URL，摘要功能将退回到备用模式")
+                self.client = None
+                self.is_local = False
+                self.local_model = None
         
         # 支持的语言映射
         self.language_map = {
@@ -211,19 +239,12 @@ class Summarizer:
 输出清理后的文本，保持原文结构。"""
 
             try:
-                response = self.client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_tokens=1200,  # 适应4000 tokens总限制
-                    temperature=0.1
-                )
-                
-                optimized_chunk = response.choices[0].message.content
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                optimized_chunk = await self._call_llm(messages, model=os.getenv("OPENAI_MODEL_NAME", "gpt-3.5-turbo"), max_tokens=1200, temperature=0.1)
                 optimized_chunks.append(optimized_chunk)
-                
             except Exception as e:
                 logger.error(f"优化第 {i+1} 块失败: {e}")
                 # 失败时使用基本清理
@@ -299,16 +320,12 @@ class Summarizer:
             )
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=4000,  # 对齐JS：优化/格式化阶段最大tokens≈4000
-                temperature=0.1
-            )
-            optimized_text = response.choices[0].message.content or ""
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+            content = await self._call_llm(messages, model=os.getenv("OPENAI_MODEL_NAME", "gpt-3.5-turbo"), max_tokens=4000, temperature=0.1)
+            optimized_text = content or ""
             # 移除诸如 "# Transcript" / "## Transcript" 等标题
             optimized_text = self._remove_transcript_heading(optimized_text)
             enforced = self._enforce_paragraph_max_chars(optimized_text.strip(), max_chars=400)
@@ -749,7 +766,6 @@ class Summarizer:
         使用改进的prompt和工程验证
         """
         try:
-            # 估算文本长度，如果太长则分块处理
             estimated_tokens = self._estimate_tokens(text)
             if estimated_tokens > 3000:  # 对于很长的文本，分块处理
                 return await self._organize_long_text_paragraphs(text, lang_instruction)
@@ -782,26 +798,20 @@ class Summarizer:
 
 重新分段后的文本："""
 
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
+            try:
+                messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=4000,  # 对齐JS：段落整理阶段最大tokens≈4000
-                temperature=0.05  # 降低温度，提高一致性
-            )
-            
-            organized_text = response.choices[0].message.content
-            
-            # 工程验证：检查段落长度
-            validated_text = self._validate_paragraph_lengths(organized_text)
-            
-            return validated_text
-            
+                ]
+                organized_text = await self._call_llm(messages, model=os.getenv("OPENAI_MODEL", os.getenv("OPENAI_MODEL_NAME", "gpt-4o")), max_tokens=4000, temperature=0.05)
+                validated_text = self._validate_paragraph_lengths(organized_text)
+                return validated_text
+            except Exception as e:
+                logger.error(f"最终段落整理失败: {e}")
+                # 失败时使用基础分段处理
+                return self._basic_paragraph_fallback(text)
         except Exception as e:
             logger.error(f"最终段落整理失败: {e}")
-            # 失败时使用基础分段处理
             return self._basic_paragraph_fallback(text)
 
     async def _organize_long_text_paragraphs(self, text: str, lang_instruction: str) -> str:
@@ -1035,19 +1045,17 @@ Requirements:
         
         # 调用OpenAI API，模型名从环境变量读取
         model_name = os.getenv("OPENAI_MODEL", os.getenv("OPENAI_MODEL_NAME", "gpt-4o"))
-        response = self.client.chat.completions.create(
-            model=model_name,
-            messages=[
+        try:
+            messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=3500,  # 控制在安全范围内，避免超出模型限制
-            temperature=0.3
-        )
-        
-        summary = response.choices[0].message.content
-
-        return self._format_summary_with_meta(summary, target_language, video_title)
+            ]
+            content = await self._call_llm(messages, model=os.getenv("OPENAI_MODEL", os.getenv("OPENAI_MODEL_NAME", "gpt-4o")), max_tokens=3500, temperature=0.3)
+            summary = content
+            return self._format_summary_with_meta(summary, target_language, video_title)
+        except Exception as e:
+            logger.error(f"摘要生成失败: {e}")
+            return self._generate_fallback_summary(transcript, target_language, video_title)
 
     async def _summarize_with_chunks(self, transcript: str, target_language: str, video_title: str, max_tokens: int) -> str:
         """
@@ -1078,19 +1086,12 @@ Output preferences: Focus on natural paragraphs, use minimal bullet points if ne
 Avoid using any subheadings or decorative separators, output content only."""
 
             try:
-                response = self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    max_tokens=1000,  # 提升分块摘要容量以涵盖更多细节
-                    temperature=0.3
-                )
-                
-                chunk_summary = response.choices[0].message.content
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                chunk_summary = await self._call_llm(messages, model=os.getenv("OPENAI_MODEL", os.getenv("OPENAI_MODEL_NAME", "gpt-4o")), max_tokens=1000, temperature=0.3)
                 chunk_summaries.append(chunk_summary)
-                
             except Exception as e:
                 logger.error(f"摘要第 {i+1} 块失败: {e}")
                 # 失败时生成简单摘要
@@ -1173,18 +1174,18 @@ Requirements:
 - Use concise and clear language
 - Form a complete content summary"""
 
-            response = self.client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
+            try:
+                messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=2500,  # 控制输出规模，兼顾上下文安全
-                temperature=0.3
-            )
-            
-            return response.choices[0].message.content
-            
+                ]
+                content = await self._call_llm(messages, model=os.getenv("OPENAI_MODEL", os.getenv("OPENAI_MODEL_NAME", "gpt-4o")), max_tokens=2500, temperature=0.3)
+                return content
+            except Exception as e:
+                logger.error(f"整合摘要失败: {e}")
+                # 失败时直接合并
+                return combined_summaries
+
         except Exception as e:
             logger.error(f"整合摘要失败: {e}")
             # 失败时直接合并
@@ -1526,3 +1527,56 @@ Requirements:
             True if OpenAI API is configured, False otherwise
         """
         return self.client is not None
+
+    async def _call_llm(self, messages, model=None, max_tokens=1200, temperature=0.2):
+        """统一封装对LLM的调用：兼容 OpenAI SDK 与本地 HTTP 适配器。
+
+        返回：字符串（模型回复文本）。
+        """
+        if not self.client:
+            raise RuntimeError("LLM 客户端未配置")
+
+        # 本地适配器（返回 dict/json）
+        if getattr(self, 'is_local', False):
+            # 强制用本地模型名
+            true_model = self.local_model or model or os.getenv('LOCAL_LLM_MODEL_NAME')
+            resp = await self.client.create_chat_completion(true_model, messages, max_tokens=max_tokens, temperature=temperature)
+            # 尝试兼容多种服务返回结构
+            if isinstance(resp, dict):
+                try:
+                    return resp['choices'][0]['message']['content']
+                except Exception:
+                    if 'results' in resp and resp['results']:
+                        r = resp['results'][0]
+                        if isinstance(r.get('content'), list):
+                            for c in r['content']:
+                                if c.get('type') in ('output_text', 'message'):
+                                    return c.get('text') or c.get('content')
+                    return str(resp)
+        # OpenAI 官方 SDK
+        try:
+            final_model = model or getattr(self, 'local_model', None) or os.getenv('OPENAI_MODEL_NAME', 'gpt-4o')
+            response = self.client.chat.completions.create(
+                model=final_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            # 若抛出异常且本地适配器可用，尝试降级到本地适配器
+            if HTTPLLMAdapter is not None and os.getenv('LOCAL_LLM_API_URL'):
+                if getattr(self, 'is_local', False):
+                    raise
+                try:
+                    adapter = HTTPLLMAdapter(api_url=os.getenv('LOCAL_LLM_API_URL'), model=os.getenv('LOCAL_LLM_MODEL_NAME'))
+                    true_model = os.getenv('LOCAL_LLM_MODEL_NAME')
+                    resp = await adapter.create_chat_completion(true_model, messages, max_tokens=max_tokens, temperature=temperature)
+                    if isinstance(resp, dict):
+                        try:
+                            return resp['choices'][0]['message']['content']
+                        except Exception:
+                            return str(resp)
+                except Exception:
+                    pass
+            raise

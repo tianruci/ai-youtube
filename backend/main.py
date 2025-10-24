@@ -133,6 +133,7 @@ async def process_video(
         # 支持本地文件：如果以 local: 开头，则视为本地项目内文件（例如 local:downloads/myvideo.mp4）
         is_local = False
         local_path = None
+        key_for_processing = None
         if url.startswith("local:"):
             is_local = True
             # 允许用户传入 local:downloads/xxx.mp4 或 local:downloads\\xxx.mp4
@@ -161,7 +162,7 @@ async def process_video(
             for tid, task in tasks.items():
                 if task.get("url") == key_for_processing:
                     return {"task_id": tid, "message": "该视频正在处理中，请等待..."}
-            
+
         # 生成唯一任务ID
         task_id = str(uuid.uuid4())
         
@@ -390,8 +391,15 @@ async def process_video_task(task_id: str, url: str, summary_language: str, is_l
             
     except Exception as e:
         logger.error(f"任务 {task_id} 处理失败: {str(e)}")
-        # 从处理列表中移除URL
-        processing_urls.discard(url)
+        # 从处理列表中移除资源标识（优先使用 key_for_processing，如果不存在则退回到 url）
+        try:
+            if 'key_for_processing' in locals() and key_for_processing:
+                processing_urls.discard(key_for_processing)
+            else:
+                processing_urls.discard(url)
+        except Exception:
+            # 忽略discard过程中可能的任何异常，继续更新任务状态
+            pass
         
         # 从活跃任务列表中移除
         if task_id in active_tasks:

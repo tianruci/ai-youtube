@@ -39,9 +39,21 @@ class Translator:
             model_name = os.getenv("OPENAI_MODEL_NAME", "gpt-4o")
             
             if not api_key:
-                logger.warning("未设置OPENAI_API_KEY环境变量")
+                # 如果未配置 OPENAI_API_KEY，尝试使用本地 HTTP LLM
+                local_api = os.getenv('LOCAL_LLM_API_URL')
+                local_model = os.getenv('LOCAL_LLM_MODEL_NAME')
+                if local_api:
+                    try:
+                        from llm_adapters import HTTPLLMAdapter
+                        self.client = HTTPLLMAdapter(api_url=local_api, model=local_model)
+                        logger.info(f"本地LLM适配器用于翻译，endpoint: {local_api}, model: {local_model}")
+                        return
+                    except Exception:
+                        logger.warning("未能初始化本地LLM适配器，翻译功能可能不可用")
+                else:
+                    logger.warning("未设置OPENAI_API_KEY环境变量，且未配置 LOCAL_LLM_API_URL")
                 return
-                
+            
             self.client = OpenAI(
                 api_key=api_key,
                 base_url=base_url

@@ -168,6 +168,27 @@ AI-Video-Transcriber/
 | `PORT` | 服务器端口 | `8000` | 否 |
 | `WHISPER_MODEL_SIZE` | Whisper模型大小 | `base` | 否 |
 
+### 本地/私有 LLM 使用说明（可选）
+
+项目支持将摘要与翻译请求转发到本地或私有的 LLM HTTP 服务（例如在 Docker 中运行的 llama 服务或 TGI）。如果不想使用 OpenAI 公共 API，可按下列步骤配置：
+
+- 启动你的本地 LLM 服务（示例：Docker 容器在本机的 8080 端口暴露 OpenAI-compatible 的 /v1/chat/completions 接口，模型已加载）。
+- 在项目运行环境设置以下环境变量：
+  - `LOCAL_LLM_API_URL`：本地服务地址，例如 `http://localhost:8080`
+  - `LOCAL_LLM_MODEL_NAME`：服务中注册的模型 id（可选，根据服务而定）
+
+示例（PowerShell）：
+```powershell
+$env:LOCAL_LLM_API_URL = 'http://localhost:8080'
+$env:LOCAL_LLM_MODEL_NAME = 'Qwen3-8B-gpt-5-reasoning-distill-Q4_K_M'
+python start.py
+```
+
+注意：
+- 本仓库实现了一个简易的 HTTP 适配器 `backend/llm_adapters.py`，会尝试调用 `/v1/chat/completions`、`/v1/models/{model}/chat/completions` 或 `/generate` 端点以兼容不同服务。
+- 你不需要把本地的 gguf 文件路径传入代码，Docker 容器在启动时已负责加载模型文件；代码只需调用服务的 HTTP API。
+- 如你的服务使用非兼容接口（自定义 JSON），需根据返回格式调整 `backend/llm_adapters.py`。 
+
 ### Whisper模型大小选项
 
 | 模型 | 参数量 | 英语专用 | 多语言 | 速度 | 内存占用 |
